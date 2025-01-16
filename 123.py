@@ -7,7 +7,7 @@ app = Flask(__name__)
 # Состояние в памяти
 # ----------------------------------------------------------------
 
-# Храним последние lobby_id, которые прислали 4 ПК.
+# Последние lobby_id от 4 ПК
 latest_lobby_id = {
     "pc1": None,
     "pc2": None,
@@ -15,8 +15,8 @@ latest_lobby_id = {
     "pc4": None
 }
 
-# Сохраняем «последнего соперника» для каждого ПК
-# Если pc1 только что играл с pc2, то pc_last_partner["pc1"] = "pc2", и наоборот
+# Запоминаем «последнего соперника» для каждого ПК, 
+# чтобы не разрешать подряд одинаковую пару:
 pc_last_partner = {
     "pc1": None,
     "pc2": None,
@@ -24,32 +24,18 @@ pc_last_partner = {
     "pc4": None
 }
 
-# Храним историю обращений (как было у вас в лобби-истории)
+# История логов (лобби). Показываем в /status
 lobby_history = []
 
-# Храним историю матчей (когда началась и когда закончилась)
+# История сыгранных матчей (кто с кем и когда)
 games_history = []
-# Пример структуры элемента:
-# {
-#   "pc1": "pc1",
-#   "pc2": "pc2",
-#   "start_time": "2025-01-16 10:00:00",
-#   "end_time": None
-# }
 
-
-# ----------------------------------------------------------------
-# Вспомогательная функция: найти пару ПК, у которых одинаковый lobby_id
-# ----------------------------------------------------------------
 def find_pair_if_any():
     """
-    Возвращает кортеж (pcA, pcB, lobby_id), если нашли двух ПК с одинаковым lobby_id.
-    Или (None, None, None) если ничего не нашли.
+    Ищем любые 2 ПК, у которых совпадает lobby_id (не None).
+    Возвращаем (pcA, pcB, lobby_id) или (None,None,None).
     """
-    # Соберём все PC -> lobby_id, где lobby_id не None
     not_none_ids = [(pc, lid) for pc, lid in latest_lobby_id.items() if lid is not None]
-
-    # Ищем любые 2 ПК с одним и тем же lobby_id
     for i in range(len(not_none_ids)):
         for j in range(i+1, len(not_none_ids)):
             pcA, lidA = not_none_ids[i]
@@ -58,78 +44,69 @@ def find_pair_if_any():
                 return (pcA, pcB, lidA)
     return (None, None, None)
 
-
-# ----------------------------------------------------------------
-# Проверка, не повторяется ли матч между теми же PC подряд
-# ----------------------------------------------------------------
 def is_repeat_match(pcA, pcB):
-    """Вернёт True, если pcA только что играл с pcB (и наоборот)."""
-    # Если последний соперник pcA == pcB И последний соперник pcB == pcA
-    # значит они только что играли. Запретим.
+    """Вернёт True, если pcA только что играл с pcB и наоборот."""
     return (pc_last_partner[pcA] == pcB) and (pc_last_partner[pcB] == pcA)
 
-
 # ----------------------------------------------------------------
-# Маршрут для приёма lobby_id
+# /lobby_id — Приём и матчинг
 # ----------------------------------------------------------------
 @app.route('/lobby_id', methods=['POST'])
 def handle_lobby_id():
-    """
-    Принимает JSON { "pc": "pc1", "lobby_id": "12345" }
-    """
     data = request.json
     pc = data.get("pc")
-    lobby_id = data.get("lobby_id")
+    new_lobby = data.get("lobby_id")
 
-    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-    # Проверка: действительно ли pc в ["pc1","pc2","pc3","pc4"] ?
     if pc not in latest_lobby_id:
         return jsonify({"status": "error", "message": "Unknown PC name"})
 
-    # Обновляем
-    latest_lobby_id[pc] = lobby_id
+    old_lobby = latest_lobby_id[pc]
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-    # Пишем в историю
-    # Статус "waiting" пока мы не знаем, матчится ли
-    lobby_history.append({
-        "timestamp": timestamp,
-        "pc1_id": latest_lobby_id["pc1"],
-        "pc2_id": latest_lobby_id["pc2"],
-        "pc3_id": latest_lobby_id["pc3"],
-        "pc4_id": latest_lobby_id["pc4"],
-        "status": "waiting"
-    })
+    # Обновляем lobby_id у ПК
+    # Если действительно поменялся, то записываем "waiting" (только один раз).
+    if new_lobby != old_lobby:
+        latest_lobby_id[pc] = new_lobby
+        # Добавляем в историю только если лобби действительно «новое»
+        # (так не будет «спама» waiting для тех же самых ID).
+        lobby_history.append({
+            "timestamp": timestamp,
+            "pc1_id": latest_lobby_id["pc1"],
+            "pc2_id": latest_lobby_id["pc2"],
+            "pc3_id": latest_lobby_id["pc3"],
+            "pc4_id": latest_lobby_id["pc4"],
+            "status": "waiting"
+        })
+    else:
+        # Если новое == старое, просто возвращаем None, без спама истории
+        # (т.е. ничего не записываем повторно)
+        pass
 
-    # Проверяем, есть ли 2 ПК с одинаковым lobby_id
+    # Проверяем, не нашлась ли пара
     pcA, pcB, match_id = find_pair_if_any()
     if pcA and pcB and match_id:
-        # Проверяем, не повторяется ли игра теми же двумя подряд
+        # Проверим, не играли ли они друг с другом сразу «подряд»
         if is_repeat_match(pcA, pcB):
-            # Отклоняем (или "search_again")
-            # Пишем в историю
+            # Запишем статус "repeat_rejected" в историю
             lobby_history.append({
                 "timestamp": timestamp,
                 "pc1_id": latest_lobby_id["pc1"],
                 "pc2_id": latest_lobby_id["pc2"],
                 "pc3_id": latest_lobby_id["pc3"],
                 "pc4_id": latest_lobby_id["pc4"],
-                "status": "repeat_rejected"  # наш статус
+                "status": "repeat_rejected"
             })
             return jsonify({"status": "search_again"})
         else:
-            # Иначе — это новый матч
-            # Устанавливаем последнего соперника
+            # Иначе — матчим
             pc_last_partner[pcA] = pcB
             pc_last_partner[pcB] = pcA
-            # Делаем запись в массив games_history (start_time — сейчас)
             games_history.append({
                 "pc1": pcA,
                 "pc2": pcB,
                 "start_time": timestamp,
                 "end_time": None
             })
-            # Пишем в историю, что match
             lobby_history.append({
                 "timestamp": timestamp,
                 "pc1_id": latest_lobby_id["pc1"],
@@ -140,41 +117,31 @@ def handle_lobby_id():
             })
             return jsonify({"status": "game_accepted"})
     else:
-        # Ждём второго (или третьего) и т.д.
+        # Пары нет, значит ждём
         return jsonify({"status": None})
 
-
 # ----------------------------------------------------------------
-# Маршрут для конца игры
+# /game_end — Когда игра закончилась (pcX присылает)
 # ----------------------------------------------------------------
 @app.route('/game_end', methods=['POST'])
 def handle_game_end():
-    """
-    Клиент присылает: { "pc": "pc1" }
-    означает, что pc1 закончил игру.
-    Но нам нужно понять, с кем он играл.
-    Найдём последнюю игру в games_history, где (pc1=pc или pc2=pc) и end_time=None
-    Запишем end_time = текущее время
-    """
     data = request.json
     pc = data.get("pc")
-    if pc not in ["pc1", "pc2", "pc3", "pc4"]:
+    if pc not in latest_lobby_id:
         return jsonify({"status": "error", "message": "Unknown PC"})
 
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-    # Ищем последнюю незавершённую игру, где участвовал pc
+    # Находим последнюю незавершённую игру, где участвовал pc
     for game in reversed(games_history):
         if game["end_time"] is None and (game["pc1"] == pc or game["pc2"] == pc):
-            # Закрываем игру
             game["end_time"] = now
             break
 
     return jsonify({"status": "ok"})
 
-
 # ----------------------------------------------------------------
-# Сброс состояния
+# /reset — сброс состояния (lobby_id и т.п.)
 # ----------------------------------------------------------------
 @app.route('/reset', methods=['POST'])
 def reset_state():
@@ -182,39 +149,28 @@ def reset_state():
     latest_lobby_id["pc2"] = None
     latest_lobby_id["pc3"] = None
     latest_lobby_id["pc4"] = None
-
-    # Можно сбросить last_partner, если хотите заново разрешить пары
+    # Можно сбросить и last_partner, если хотите
     # pc_last_partner["pc1"] = None
     # pc_last_partner["pc2"] = None
     # pc_last_partner["pc3"] = None
     # pc_last_partner["pc4"] = None
-
     return "OK"
 
-
 # ----------------------------------------------------------------
-# Вспомогательная функция для HTML-рендеринга
-# ----------------------------------------------------------------
-def format_end_time(et):
-    return et if et else "—"
-
-
-# ----------------------------------------------------------------
-# Маршрут статуса (4 ПК + история + история игр)
+# /status — HTML-страница с панелями PC1..PC4, 
+#            историей лобби (посл. 8 записей), 
+#            историей игр (посл. 8).
 # ----------------------------------------------------------------
 @app.route('/status')
 def fancy_status():
-    # Берём последний lobby_id для каждого
     pc1_id = latest_lobby_id["pc1"] or "—"
     pc2_id = latest_lobby_id["pc2"] or "—"
     pc3_id = latest_lobby_id["pc3"] or "—"
     pc4_id = latest_lobby_id["pc4"] or "—"
 
-    # Последние ~5 событий лобби
-    recent_lobby = lobby_history[-5:] if len(lobby_history) > 0 else []
-
-    # Последние ~5 матчей
-    recent_games = games_history[-5:] if len(games_history) > 0 else []
+    # Последние 8 записей
+    recent_lobby = lobby_history[-8:] if len(lobby_history) > 0 else []
+    recent_games = games_history[-8:] if len(games_history) > 0 else []
 
     html_template = """
 <!DOCTYPE html>
@@ -299,7 +255,6 @@ def fancy_status():
       line-height: 1.4;
     }
     .status-match { color: #4caf50; }
-    .status-no_match { color: #e53935; }
     .status-waiting { color: #ffb300; }
     .status-repeat_rejected { color: #e53935; }
     .status-search_again { color: #e53935; }
@@ -308,30 +263,22 @@ def fancy_status():
 <body>
   <h1>Dota Lobby Status</h1>
   
-  <!-- 4 панели -->
   <div class="board">
-    <!-- pc1 -->
     <div class="panel">
       <div class="circle">PC1</div>
       <div class="label">Last Found Lobby ID</div>
       <div class="value">{{ pc1_id }}</div>
     </div>
-
-    <!-- pc2 -->
     <div class="panel">
       <div class="circle">PC2</div>
       <div class="label">Last Found Lobby ID</div>
       <div class="value">{{ pc2_id }}</div>
     </div>
-
-    <!-- pc3 -->
     <div class="panel">
       <div class="circle">PC3</div>
       <div class="label">Last Found Lobby ID</div>
       <div class="value">{{ pc3_id }}</div>
     </div>
-
-    <!-- pc4 -->
     <div class="panel">
       <div class="circle">PC4</div>
       <div class="label">Last Found Lobby ID</div>
@@ -339,17 +286,16 @@ def fancy_status():
     </div>
   </div>
 
-  <!-- Блок истории Lobby -->
   <div class="history-panel">
-    <h2>Recent History</h2>
+    <h2>Recent Lobby History (last 8)</h2>
     <div class="history">
       {% if recent_lobby %}
         {% for entry in recent_lobby %}
           <div class="history-item">
-            {{ entry.timestamp }} —
-            PC1: {{ entry.pc1_id or '—' }}, 
-            PC2: {{ entry.pc2_id or '—' }}, 
-            PC3: {{ entry.pc3_id or '—' }}, 
+            {{ entry.timestamp }} — 
+            PC1: {{ entry.pc1_id or '—' }},
+            PC2: {{ entry.pc2_id or '—' }},
+            PC3: {{ entry.pc3_id or '—' }},
             PC4: {{ entry.pc4_id or '—' }}
             <span class="status-{{ entry.status }}">[{{ entry.status }}]</span>
           </div>
@@ -360,9 +306,8 @@ def fancy_status():
     </div>
   </div>
 
-  <!-- История игр (pcA vs pcB) -->
   <div class="games-panel">
-    <h2>Recent Games</h2>
+    <h2>Recent Games (last 8)</h2>
     <div class="history">
       {% if recent_games %}
         {% for g in recent_games %}
